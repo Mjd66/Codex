@@ -61,6 +61,16 @@ def clean_json_text(text: str) -> str:
     return text.strip()
 
 
+def bytes_to_human(num_bytes: int) -> str:
+    value = float(max(0, num_bytes))
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return f"{value:.2f} TB"
+
+
 # ============================================================
 # Config and models
 # ============================================================
@@ -287,6 +297,80 @@ class NextSentencePredictionResult:
     backend: str
     model: str
     details: dict[str, Any]
+
+
+@dataclass(slots=True)
+class ComplexAbs2MethodRef:
+    name: str
+    backend_key: str
+    preserves_input: bool
+    output_dtype: str
+    memory_note: str
+    source_url: str
+
+
+@dataclass(slots=True)
+class BuiltinComplexModuleRef:
+    name: str
+    short_description: str
+    last_verified: str
+    constructor_syntax: list[str]
+    arguments: dict[str, str]
+    return_value: str
+    examples: list[str]
+    methods: dict[str, str]
+    common_use_cases: list[str]
+    real_world_example: list[str]
+    related_resources: list[str]
+    source_url: str
+
+
+@dataclass(slots=True)
+class EmergingPython2026ModuleRef:
+    name: str
+    category: str
+    summary: str
+    python_stack: list[str]
+    suggested_application: str
+    cited_versions: dict[str, str]
+    compliance_notes: list[str]
+    source_url: str
+
+
+@dataclass(slots=True)
+class LinkedInPython2025TrendModuleRef:
+    trend_id: int
+    trend_name: str
+    summary: str
+    python_stack: list[str]
+    suggested_application: str
+    learning_path: list[str]
+    source_url: str
+
+
+@dataclass(slots=True)
+class VRAutonomyAccessibilityModuleRef:
+    module_id: int
+    name: str
+    category: str
+    summary: str
+    python_stack: list[str]
+    mixed_stack: list[str]
+    target_outcome: str
+    compliance_notes: list[str]
+    sources: list[str]
+
+
+@dataclass(slots=True)
+class VRAutonomySimulationResult:
+    steps: int
+    automation_reliability: float
+    update_safety_score: float
+    autopilot_world_stability: float
+    haptic_accessibility_score: float
+    hearing_accessibility_score: float
+    mental_mode_safety_score: float
+    overall_safety_score: float
 
 
 @dataclass(slots=True)
@@ -663,6 +747,568 @@ def run_nsp_prediction(
     return _nsp_heuristic(sentence_a, sentence_b)
 
 
+def build_complex_abs2_module_catalog() -> list[ComplexAbs2MethodRef]:
+    src = "https://stackoverflow.com/questions/30437947/most-memory-efficient-way-to-compute-abs2-of-complex-numpy-ndarray"
+    return [
+        ComplexAbs2MethodRef(
+            name="NumPy abs + in-place square",
+            backend_key="numpy_abs_square",
+            preserves_input=True,
+            output_dtype="real",
+            memory_note="Allocates one real output array; squares in place to avoid extra temp.",
+            source_url=src,
+        ),
+        ComplexAbs2MethodRef(
+            name="In-place complex overwrite",
+            backend_key="numpy_inplace_complex",
+            preserves_input=False,
+            output_dtype="real-view",
+            memory_note="Overwrites input complex buffer for lowest overhead when mutation is allowed.",
+            source_url=src,
+        ),
+        ComplexAbs2MethodRef(
+            name="Numba vectorized ufunc",
+            backend_key="numba_vectorize",
+            preserves_input=True,
+            output_dtype="real",
+            memory_note="Computes abs2 directly per element with no large intermediate arrays.",
+            source_url=src,
+        ),
+        ComplexAbs2MethodRef(
+            name="Conjugate multiply",
+            backend_key="conjugate_multiply",
+            preserves_input=True,
+            output_dtype="real",
+            memory_note="Simple expression but keeps complex intermediate buffer.",
+            source_url=src,
+        ),
+        ComplexAbs2MethodRef(
+            name="Float-view dot",
+            backend_key="float_view_dot",
+            preserves_input=True,
+            output_dtype="real",
+            memory_note="Uses float view and einsum; may require contiguous conversion copy.",
+            source_url=src,
+        ),
+    ]
+
+
+_ABS2_NUMBA_CACHE: dict[str, Any] = {}
+
+
+def build_complex_abs2_module_spec() -> dict[str, Any]:
+    src = "https://stackoverflow.com/questions/30437947/most-memory-efficient-way-to-compute-abs2-of-complex-numpy-ndarray"
+    return {
+        "name": "Memory-Efficient abs2 for complex NumPy arrays",
+        "source_url": src,
+        "goal": "Compute |z|^2 for large complex arrays with low temporary-memory pressure.",
+        "notes": [
+            "Use in-place operations (`out=`) where possible.",
+            "If input must be preserved, prefer single-output pipelines.",
+            "Numba vectorize backend can avoid large intermediate arrays.",
+        ],
+    }
+
+
+def _estimate_abs2_peak_bytes(np_mod: Any, arr_np: Any, backend: str, preserve_input: bool) -> int:
+    input_bytes = int(arr_np.nbytes)
+    real_itemsize = int(arr_np.real.dtype.itemsize)
+    output_bytes = int(arr_np.size * real_itemsize)
+    backend = backend.lower()
+
+    if backend == "numpy_inplace_complex":
+        extra = 0 if not preserve_input else input_bytes
+    elif backend == "conjugate_multiply":
+        extra = input_bytes
+    elif backend == "float_view_dot":
+        try:
+            is_contiguous = bool(arr_np.flags["C_CONTIGUOUS"])
+        except Exception:  # noqa: BLE001
+            is_contiguous = False
+        contiguous_copy = 0 if is_contiguous else input_bytes
+        extra = output_bytes + contiguous_copy
+    else:
+        extra = output_bytes
+
+    return input_bytes + extra
+
+
+def compute_complex_abs2(
+    arr: Any,
+    backend: str = "auto",
+    preserve_input: bool = True,
+) -> tuple[Any, dict[str, Any]]:
+    import importlib
+
+    np_mod = importlib.import_module("numpy")
+    arr_np = np_mod.asarray(arr)
+    if not np_mod.iscomplexobj(arr_np):
+        raise ValueError("compute_complex_abs2 expects a complex ndarray.")
+
+    backend = backend.strip().lower()
+    if backend not in {"auto", "numpy_abs_square", "numpy_inplace_complex", "numba_vectorize", "conjugate_multiply", "float_view_dot"}:
+        raise ValueError("Unsupported backend for complex abs2 module.")
+
+    if backend == "auto":
+        if preserve_input:
+            try:
+                importlib.import_module("numba")
+                backend = "numba_vectorize"
+            except Exception:  # noqa: BLE001
+                backend = "numpy_abs_square"
+        else:
+            backend = "numpy_inplace_complex"
+
+    if backend == "numpy_abs_square":
+        out = np_mod.abs(arr_np)
+        np_mod.square(out, out=out)
+    elif backend == "numpy_inplace_complex":
+        work = arr_np.copy() if preserve_input else arr_np
+        np_mod.abs(work, out=work)
+        np_mod.square(work, out=work)
+        out = work.real.copy()
+    elif backend == "numba_vectorize":
+        numba_mod = importlib.import_module("numba")
+        dtype_key = str(arr_np.dtype)
+        if dtype_key not in _ABS2_NUMBA_CACHE:
+            if arr_np.dtype == np_mod.complex128:
+                signature = [numba_mod.float64(numba_mod.complex128)]
+            elif arr_np.dtype == np_mod.complex64:
+                signature = [numba_mod.float32(numba_mod.complex64)]
+            else:
+                raise ValueError("numba_vectorize supports complex64 and complex128.")
+
+            @numba_mod.vectorize(signature, nopython=True, cache=True)
+            def _abs2_numba(x: Any) -> Any:
+                return x.real * x.real + x.imag * x.imag
+
+            _ABS2_NUMBA_CACHE[dtype_key] = _abs2_numba
+        out = _ABS2_NUMBA_CACHE[dtype_key](arr_np)
+    elif backend == "conjugate_multiply":
+        work = arr_np.conjugate()
+        np_mod.multiply(arr_np, work, out=work)
+        out = work.real.copy()
+    else:
+        # float_view_dot
+        if arr_np.dtype == np_mod.complex128:
+            float_type = np_mod.float64
+        elif arr_np.dtype == np_mod.complex64:
+            float_type = np_mod.float32
+        else:
+            raise ValueError("float_view_dot supports complex64 and complex128.")
+        src = arr_np if bool(arr_np.flags["C_CONTIGUOUS"]) else np_mod.ascontiguousarray(arr_np)
+        float_view = src.view(float_type).reshape(arr_np.shape + (2,))
+        out = np_mod.einsum("...i,...i->...", float_view, float_view, optimize=True)
+
+    info = {
+        "backend_used": backend,
+        "input_dtype": str(arr_np.dtype),
+        "output_dtype": str(out.dtype),
+        "input_nbytes": int(arr_np.nbytes),
+        "output_nbytes": int(out.nbytes),
+        "peak_estimate_bytes": _estimate_abs2_peak_bytes(np_mod, arr_np, backend, preserve_input),
+        "preserve_input_requested": bool(preserve_input),
+        "source_url": build_complex_abs2_module_spec()["source_url"],
+    }
+    return out, info
+
+
+def _parse_shape_csv(value: str) -> tuple[int, ...]:
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("Shape string is empty.")
+    dims = tuple(int(p) for p in parts)
+    if any(d <= 0 for d in dims):
+        raise ValueError("All shape dimensions must be positive.")
+    return dims
+
+
+def build_realpython_complex_module() -> BuiltinComplexModuleRef:
+    src = "https://realpython.com/ref/builtin-types/complex/"
+    return BuiltinComplexModuleRef(
+        name="Python built-in complex() reference module",
+        short_description="Create and work with complex numbers using Python's built-in complex type.",
+        last_verified="2026-03-13",
+        constructor_syntax=[
+            "complex(real=0, imag=0)",
+            "complex(string)",
+        ],
+        arguments={
+            "real": "Numeric real part when imag is provided.",
+            "imag": "Numeric imaginary part when provided with real.",
+            "string": "String representation like '1+2j' (imag must not be passed).",
+        },
+        return_value="A complex number object with `.real` and `.imag` components.",
+        examples=[
+            "complex(1, 2) -> (1+2j)",
+            "complex('3+4j') -> (3+4j)",
+            "z = 1+2j; z.conjugate() -> (1-2j)",
+            "abs(3+4j) -> 5.0",
+        ],
+        methods={
+            "conjugate()": "Return the complex conjugate (flip sign of imaginary part).",
+            "real": "Read the real component.",
+            "imag": "Read the imaginary component.",
+            "__abs__ / abs(z)": "Return the magnitude sqrt(real^2 + imag^2).",
+            "__add__, __sub__, __mul__, __truediv__": "Standard complex arithmetic operators.",
+        },
+        common_use_cases=[
+            "Signal processing and electrical engineering calculations",
+            "2D geometry representation and transforms",
+            "Distance between points via abs(z1 - z2)",
+            "Polar/cartesian reasoning in physics and simulations",
+        ],
+        real_world_example=[
+            "Point A = 2+3j and Point B = 4+7j",
+            "Distance = abs((4+7j) - (2+3j)) = abs(2+4j) = sqrt(20)",
+            "This pattern maps naturally to coordinate distance calculations.",
+        ],
+        related_resources=[
+            "https://realpython.com/python-complex-numbers/",
+            "https://docs.python.org/3/library/stdtypes.html#numeric-types-int-float-complex",
+        ],
+        source_url=src,
+    )
+
+
+def _parse_complex_literal(value: str) -> complex:
+    text = value.strip().replace(" ", "")
+    if not text:
+        raise ValueError("Complex literal is empty.")
+    try:
+        return complex(text)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Invalid complex literal: {value}") from exc
+
+
+def run_complex_module_demo(a_literal: str, b_literal: str) -> dict[str, Any]:
+    a = _parse_complex_literal(a_literal)
+    b = _parse_complex_literal(b_literal)
+    midpoint = (a + b) / 2
+    delta = b - a
+    return {
+        "input_a": str(a),
+        "input_b": str(b),
+        "sum": str(a + b),
+        "difference_b_minus_a": str(delta),
+        "product": str(a * b),
+        "conjugate_a": str(a.conjugate()),
+        "conjugate_b": str(b.conjugate()),
+        "magnitude_a": float(abs(a)),
+        "magnitude_b": float(abs(b)),
+        "distance_between_points": float(abs(delta)),
+        "midpoint": str(midpoint),
+        "phase_alignment_hint": "Smaller absolute phase difference suggests better alignment in oscillatory systems.",
+    }
+
+
+def build_dasroot_emerging_python_2026_modules() -> list[EmergingPython2026ModuleRef]:
+    src = "https://dasroot.net/posts/2026/03/emerging-python-use-cases-2026/"
+    legal = [
+        "Respect robots.txt and site terms before scraping or automated extraction.",
+        "Store only minimum required data and avoid sensitive personal information by default.",
+        "Prefer API/data-export endpoints when available over aggressive HTML crawling.",
+    ]
+    return [
+        EmergingPython2026ModuleRef(
+            name="NL Data Analysis Copilot",
+            category="AI-driven data analysis",
+            summary="Natural-language analytics workflow where users ask plain-language questions over tabular data.",
+            python_stack=["Python", "pandas", "OpenAI API", "Jupyter"],
+            suggested_application="Build a notebook/CLI copilot that converts text queries into data transforms and charts.",
+            cited_versions={"article_date": "2026-03"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="Anaconda LLM Experiment Lab",
+            category="AI-driven data analysis",
+            summary="Local-first experimentation with AI Navigator-style environment management for LLM workflows.",
+            python_stack=["Python", "conda", "Transformers", "PyTorch"],
+            suggested_application="Create a reproducible prompt/model comparison runner with environment snapshots.",
+            cited_versions={"Anaconda AI Navigator": "2.0"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="Jupyter AI Model Builder",
+            category="AI-driven data analysis",
+            summary="Notebook-native assistant to streamline feature prep, model training, and evaluation loops.",
+            python_stack=["Python", "Jupyter AI", "scikit-learn", "matplotlib"],
+            suggested_application="Autogenerate training/evaluation notebook cells from dataset metadata.",
+            cited_versions={"Jupyter AI": "2.31.6"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="Temporal Workflow Orchestrator",
+            category="Distributed systems and automation",
+            summary="Long-running, reliable orchestration using workflows, activities, and signals.",
+            python_stack=["Python", "Temporal SDK", "PostgreSQL", "Redis"],
+            suggested_application="Build fault-tolerant AI job pipelines with retries and human approval signals.",
+            cited_versions={"Temporal Python SDK": "2.10.0"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="Polars ETL Acceleration",
+            category="Modern high-performance libraries",
+            summary="Columnar DataFrame processing optimized for speed and low memory pressure.",
+            python_stack=["Python", "Polars", "Arrow", "Parquet"],
+            suggested_application="Replace pandas-heavy ingestion stages with Polars lazy pipelines.",
+            cited_versions={"Polars": "0.19.0"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="Smolagents Action Engine",
+            category="Modern high-performance libraries",
+            summary="Lightweight agent framework with tool calls and sandboxed execution patterns.",
+            python_stack=["Python", "smolagents", "Transformers"],
+            suggested_application="Create constrained autonomous task runners for data ops and report generation.",
+            cited_versions={"smolagents": "1.2.0"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="MarkItDown Ingestion Gateway",
+            category="Document processing",
+            summary="Normalize diverse document types into markdown for LLM-friendly retrieval/indexing.",
+            python_stack=["Python", "markitdown", "pathlib"],
+            suggested_application="Build a document-to-markdown ingestion stage before vector indexing.",
+            cited_versions={"MarkItDown": "2.1.0"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="PySide6 Desktop Ops Console",
+            category="GUI and frontend",
+            summary="Desktop-native monitoring/control surfaces for AI pipelines and model status.",
+            python_stack=["Python", "PySide6", "Qt", "asyncio"],
+            suggested_application="Ship an internal desktop console with realtime workflow status and controls.",
+            cited_versions={"PySide6/PyQt6": "6.5.2"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="NiceGUI Rapid App Layer",
+            category="GUI and frontend",
+            summary="Fast web app interfaces for dashboards, controls, and simple workflow portals.",
+            python_stack=["Python", "NiceGUI", "FastAPI"],
+            suggested_application="Expose AI workflow controls and metrics as lightweight internal web apps.",
+            cited_versions={"NiceGUI": "latest in article"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+        EmergingPython2026ModuleRef(
+            name="Streamlit Insight Workbench",
+            category="GUI and frontend",
+            summary="Low-friction analytical frontends for model outputs and business insight sharing.",
+            python_stack=["Python", "Streamlit", "pandas", "plotly"],
+            suggested_application="Deliver stakeholder-facing analytics views with minimal frontend overhead.",
+            cited_versions={"Streamlit": "latest in article"},
+            compliance_notes=legal,
+            source_url=src,
+        ),
+    ]
+
+
+def build_linkedin_python_trends_2025_modules() -> list[LinkedInPython2025TrendModuleRef]:
+    src = "https://www.linkedin.com/pulse/top-python-trends-2025-what-every-developer-should-know-goud-0cvbcf"
+    return [
+        LinkedInPython2025TrendModuleRef(
+            trend_id=1,
+            trend_name="AI and Machine Learning Dominance",
+            summary="Python remains central for ML/AI workflows from experimentation to deployment.",
+            python_stack=["Python", "PyTorch", "TensorFlow", "scikit-learn"],
+            suggested_application="Add an AI experiment orchestration module with standardized train/eval pipelines.",
+            learning_path=["Linear algebra and statistics", "Model training", "MLOps deployment basics"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=2,
+            trend_name="Data Science and Big Data Evolution",
+            summary="Data-heavy workflows continue to scale with Python analytics and pipeline tools.",
+            python_stack=["Python", "pandas", "Polars", "Dask", "Apache Spark"],
+            suggested_application="Build a dual-engine ETL app that auto-switches between pandas and Polars/Dask by dataset size.",
+            learning_path=["Data wrangling", "Feature engineering", "Distributed processing"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=3,
+            trend_name="Web Development with Modern Frameworks",
+            summary="FastAPI and Django-style ecosystems remain strong for service and product backends.",
+            python_stack=["Python", "FastAPI", "Django", "SQLModel"],
+            suggested_application="Add a microservice generator for API + auth + telemetry bootstrap.",
+            learning_path=["HTTP and REST", "Async Python", "Backend architecture patterns"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=4,
+            trend_name="Cybersecurity and Ethical Hacking Growth",
+            summary="Python tooling is widely used for security testing, monitoring, and analysis automation.",
+            python_stack=["Python", "Scapy", "Requests", "YARA"],
+            suggested_application="Create a compliance-first security scanner module with safe read-only probes.",
+            learning_path=["Network fundamentals", "Security testing ethics", "Secure coding practices"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=5,
+            trend_name="Cloud Computing and Serverless Expansion",
+            summary="Python powers cloud-native automation and function-driven workloads across providers.",
+            python_stack=["Python", "AWS Lambda", "Azure Functions", "Google Cloud Functions"],
+            suggested_application="Add a deployment planner that maps workloads to serverless vs container runtimes.",
+            learning_path=["Cloud architecture", "IaC basics", "Cost/performance tuning"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=6,
+            trend_name="Automation and DevOps Integration",
+            summary="Automation remains a major Python use case in CI/CD and platform operations.",
+            python_stack=["Python", "GitHub Actions", "Ansible", "Docker SDK"],
+            suggested_application="Implement a pipeline auto-remediator for failed CI steps with playbook hints.",
+            learning_path=["Scripting fundamentals", "CI/CD pipelines", "Observability"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=7,
+            trend_name="IoT and Edge Computing Adoption",
+            summary="Python continues to be practical for prototyping and deploying edge intelligence.",
+            python_stack=["Python", "MicroPython", "CircuitPython", "MQTT"],
+            suggested_application="Add an edge telemetry module with offline buffering and delayed sync.",
+            learning_path=["Embedded basics", "Sensor data handling", "Edge model optimization"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=8,
+            trend_name="Blockchain and Web3 Prototyping",
+            summary="Python is used for blockchain analytics, smart-contract tooling, and test harnesses.",
+            python_stack=["Python", "web3.py", "Brownie", "eth-account"],
+            suggested_application="Build a chain-observer app for transaction risk and anomaly summaries.",
+            learning_path=["Blockchain fundamentals", "Smart contract interaction", "Security auditing basics"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=9,
+            trend_name="Quantum Computing Exploration",
+            summary="Python remains the entry language for quantum experimentation and simulators.",
+            python_stack=["Python", "Qiskit", "Cirq", "NumPy"],
+            suggested_application="Create a hybrid classical-quantum simulator runner for education and benchmarking.",
+            learning_path=["Linear algebra", "Quantum gates/circuits", "Simulator interpretation"],
+            source_url=src,
+        ),
+        LinkedInPython2025TrendModuleRef(
+            trend_id=10,
+            trend_name="Low-Code/No-Code API Automation",
+            summary="Python bridges enterprise no-code tools with custom logic and integrations.",
+            python_stack=["Python", "FastAPI", "Zapier/Make webhooks", "Pydantic"],
+            suggested_application="Add a no-code connector module that validates payloads and executes safe automations.",
+            learning_path=["API design", "Webhook security", "Integration testing"],
+            source_url=src,
+        ),
+    ]
+
+
+def build_vr_autonomy_accessibility_modules() -> list[VRAutonomyAccessibilityModuleRef]:
+    nlp_mental_src = "https://www.nimh.nih.gov/health/topics/technology-and-the-future-of-mental-health-treatment"
+    nasa_tlx_src = "https://humansystems.arc.nasa.gov/groups/TLX/"
+    return [
+        VRAutonomyAccessibilityModuleRef(
+            module_id=1,
+            name="VR Automation Control Plane",
+            category="automation system",
+            summary="Use Python workflow orchestration to schedule world tasks, retries, and safety approvals.",
+            python_stack=["Python", "Prefect", "FastAPI", "Pydantic", "PostgreSQL"],
+            mixed_stack=["Rust workers (optional)", "C++ device bridge adapters (optional)"],
+            target_outcome="Reliable autonomous job execution for multi-scene VR pipelines.",
+            compliance_notes=[
+                "Require explicit approval gates for high-impact world-state changes.",
+                "Maintain audit logs for autonomous decisions and rollback actions.",
+            ],
+            sources=["https://github.com/PrefectHQ/prefect"],
+        ),
+        VRAutonomyAccessibilityModuleRef(
+            module_id=2,
+            name="Auto-Update Guardrail Engine",
+            category="auto update",
+            summary="Automate dependency and module updates with staged rollout, policy checks, and fast rollback.",
+            python_stack=["Python", "Dependabot", "Renovate", "pytest", "pip-tools"],
+            mixed_stack=["GitHub Actions YAML", "Container image scanning tools"],
+            target_outcome="Continuously updated runtime with lower breakage risk.",
+            compliance_notes=[
+                "Pin versions and verify signatures/checksums before deployment.",
+                "Ship canary updates first, then promote only after health checks pass.",
+            ],
+            sources=[
+                "https://docs.github.com/en/code-security/dependabot/dependabot-version-updates",
+                "https://docs.renovatebot.com/",
+            ],
+        ),
+        VRAutonomyAccessibilityModuleRef(
+            module_id=3,
+            name="VR World Autopilot Navigator",
+            category="autopilot for vr worlds",
+            summary="Train/predict navigation actions that keep users safe while moving through complex virtual scenes.",
+            python_stack=["Python", "Habitat-Lab", "PyTorch", "NumPy"],
+            mixed_stack=["C++ simulation backends", "Unity/C# world runtime (optional)"],
+            target_outcome="Autonomous path guidance with obstacle avoidance in VR worlds.",
+            compliance_notes=[
+                "Keep a human override and emergency stop at all times.",
+                "Constrain autopilot velocity/acceleration to comfort-safe VR thresholds.",
+            ],
+            sources=["https://github.com/facebookresearch/habitat-lab"],
+        ),
+        VRAutonomyAccessibilityModuleRef(
+            module_id=4,
+            name="Haptic Guidance for Blind and Low-Vision Users",
+            category="haptic enhancement for blind users",
+            summary="Convert scene hazards, route direction, and interaction affordances into structured haptic cues.",
+            python_stack=["Python", "OpenXR bindings", "NumPy", "asyncio"],
+            mixed_stack=["OpenXR C API", "C++ haptic driver plugins"],
+            target_outcome="Accessible non-visual navigation and interaction in VR.",
+            compliance_notes=[
+                "Allow user-tunable vibration strength and pattern profiles.",
+                "Provide redundant cues (haptic + audio) for critical safety events.",
+            ],
+            sources=[
+                "https://registry.khronos.org/OpenXR/specs/1.1/man/html/XrPath.html",
+                "https://www.microsoft.com/en-us/research/publication/haptic-and-auditory-cane-for-virtual-environment/",
+            ],
+        ),
+        VRAutonomyAccessibilityModuleRef(
+            module_id=5,
+            name="VR Hearing Assist and Audio Caption Layer",
+            category="better hearing for vr",
+            summary="Add real-time captions and directional audio cues to improve speech and sound-event comprehension.",
+            python_stack=["Python", "Whisper", "WebVTT", "FastAPI"],
+            mixed_stack=["C++ spatial audio engine", "WebXR/WebAudio overlays"],
+            target_outcome="Improved accessibility for d/Deaf and hard-of-hearing VR users.",
+            compliance_notes=[
+                "Captions should be synchronized, accurate, and available for all key audio content.",
+                "Include speech/non-speech context labels for critical environmental sounds.",
+            ],
+            sources=[
+                "https://www.w3.org/WAI/media/av/captions/",
+                "https://www.researchgate.net/publication/318430895_Sound_Accessibility_in_Virtual_Reality_Using_Interactive_3D_Audio_Captions",
+            ],
+        ),
+        VRAutonomyAccessibilityModuleRef(
+            module_id=6,
+            name="Mental Mode Regulator",
+            category="mental mode",
+            summary="Estimate cognitive load/stress and adapt interaction pace, difficulty, and interruption policies in-session.",
+            python_stack=["Python", "NumPy", "pandas", "scikit-learn", "FastAPI"],
+            mixed_stack=["Wearable SDKs", "Unity/C# adaptive UI overlays"],
+            target_outcome="Lower overload risk and more stable long-session performance.",
+            compliance_notes=[
+                "This is wellness support and workload adaptation, not medical diagnosis.",
+                "Offer local emergency-resource escalation pathways for severe distress signals.",
+            ],
+            sources=[nlp_mental_src, nasa_tlx_src],
+        ),
+    ]
+
+
 def build_openai_module_catalog() -> list[OpenAIModuleRef]:
     # Curated from official OpenAI documentation.
     return [
@@ -921,6 +1567,116 @@ def simulate_vr_timetravel(
         frame_stability_score=frame_stability_total / denom,
         latency_risk=latency_risk_total / denom,
         recommended_modules=[m.name for m in modules[:4]],
+    )
+
+
+def simulate_vr_autonomy_accessibility(
+    config: AgentConfig,
+    steps: int = 14,
+    modules: list[VRAutonomyAccessibilityModuleRef] | None = None,
+) -> VRAutonomySimulationResult:
+    modules = modules or build_vr_autonomy_accessibility_modules()
+    perf = PerformanceState(
+        writing_speed=max(0.6, config.writing_speed),
+        activity_level=max(0.7, config.activity_level),
+        energy=max(10.0, config.base_energy),
+        heat_resistance=max(0.0, min(0.99, config.heat_resistance)),
+        burn_rate=max(1.0, config.burn_rate),
+        heat_absorb_rate=max(0.05, min(0.95, config.heat_absorb_rate)),
+    )
+
+    automation_total = 0.0
+    update_total = 0.0
+    autopilot_total = 0.0
+    haptic_total = 0.0
+    hearing_total = 0.0
+    mental_total = 0.0
+
+    module_boost = min(0.38, len(modules) * 0.026)
+    for turn in range(1, max(1, steps) + 1):
+        temp = perf.tune_for_turn(config.temperature, turn, steps)
+        thermal_penalty = min(0.62, perf.heat / 135.0)
+        energy_norm = min(1.2, max(0.0, perf.energy / 170.0))
+
+        automation_score = max(
+            0.0,
+            min(
+                1.0,
+                0.66 + module_boost + (energy_norm * 0.14) - (thermal_penalty * 0.52) + (perf.activity_level * 0.04),
+            ),
+        )
+        update_score = max(
+            0.0,
+            min(
+                1.0,
+                0.64 + module_boost + (config.heat_resistance * 0.12) - (temp * 0.24) - (thermal_penalty * 0.2),
+            ),
+        )
+        autopilot_score = max(
+            0.0,
+            min(
+                1.0,
+                0.61 + module_boost + (energy_norm * 0.18) - (thermal_penalty * 0.55) - (temp * 0.18),
+            ),
+        )
+        haptic_score = max(
+            0.0,
+            min(
+                1.0,
+                0.67 + module_boost + (config.resilience_factor * 0.08) - (thermal_penalty * 0.18),
+            ),
+        )
+        hearing_score = max(
+            0.0,
+            min(
+                1.0,
+                0.66 + module_boost + (energy_norm * 0.09) - (temp * 0.12) - (thermal_penalty * 0.16),
+            ),
+        )
+        mental_score = max(
+            0.0,
+            min(
+                1.0,
+                0.63 + module_boost + (config.resilience_factor * 0.14) - (temp * 0.23) - (thermal_penalty * 0.2),
+            ),
+        )
+
+        automation_total += automation_score
+        update_total += update_score
+        autopilot_total += autopilot_score
+        haptic_total += haptic_score
+        hearing_total += hearing_score
+        mental_total += mental_score
+
+        # Model compute load and adaptive cooling under sustained autonomous control.
+        perf.heat += 1.05 + (temp * 0.75) + ((1.0 - automation_score) * 0.5) + ((1.0 - autopilot_score) * 0.7)
+        perf.energy = max(0.0, min(320.0, perf.energy + (haptic_score * 0.55) + (hearing_score * 0.5) - (temp * 5.5)))
+
+    denom = float(max(1, steps))
+    automation_reliability = automation_total / denom
+    update_safety_score = update_total / denom
+    autopilot_world_stability = autopilot_total / denom
+    haptic_accessibility_score = haptic_total / denom
+    hearing_accessibility_score = hearing_total / denom
+    mental_mode_safety_score = mental_total / denom
+    overall_safety_score = (
+        (automation_reliability * 0.2)
+        + (update_safety_score * 0.16)
+        + (autopilot_world_stability * 0.2)
+        + (haptic_accessibility_score * 0.16)
+        + (hearing_accessibility_score * 0.16)
+        + (mental_mode_safety_score * 0.12)
+    )
+
+    return VRAutonomySimulationResult(
+        steps=max(1, steps),
+        automation_reliability=automation_reliability,
+        update_safety_score=update_safety_score,
+        autopilot_world_stability=autopilot_world_stability,
+        haptic_accessibility_score=haptic_accessibility_score,
+        hearing_accessibility_score=hearing_accessibility_score,
+        mental_mode_safety_score=mental_mode_safety_score,
+        overall_safety_score=overall_safety_score,
     )
 
 
@@ -1872,6 +2628,9 @@ class CodexUnifiedAgent:
         self.openai_modules = build_openai_module_catalog()
         self.vr_modules = build_vr_module_catalog()
         self.vr_timetravel_modules = build_semanticproxy_vr_timetravel_modules()
+        self.dasroot_2026_modules = build_dasroot_emerging_python_2026_modules()
+        self.linkedin_2025_modules = build_linkedin_python_trends_2025_modules()
+        self.vr_autonomy_accessibility_modules = build_vr_autonomy_accessibility_modules()
         self.web_idea_catalog = build_bestprojectideas_ai50_catalog()
         self.requested_addons = build_requested_addons32_catalog()
         self.performance = PerformanceState(
@@ -1930,6 +2689,18 @@ class CodexUnifiedAgent:
             f"- {m.name}: {m.focus} [{', '.join(m.python_stack[:2])}] :: {m.source_url}"
             for m in self.vr_timetravel_modules[:4]
         )
+        dasroot_lines = "\n".join(
+            f"- {m.name} ({m.category}) :: {m.suggested_application}"
+            for m in self.dasroot_2026_modules[:6]
+        )
+        linkedin_lines = "\n".join(
+            f"- #{m.trend_id} {m.trend_name} :: {m.suggested_application}"
+            for m in self.linkedin_2025_modules[:6]
+        )
+        vr_autonomy_lines = "\n".join(
+            f"- #{m.module_id} {m.name} ({m.category}) :: {m.target_outcome}"
+            for m in self.vr_autonomy_accessibility_modules[:6]
+        )
         idea_sample = "\n".join(
             f"- #{i.idea_id} [{i.level}] {i.title} ({', '.join(i.languages[:2])})"
             for i in self.web_idea_catalog[:10]
@@ -1939,6 +2710,9 @@ class CodexUnifiedAgent:
             for a in self.requested_addons[:12]
         )
         nsp_hint = "- Next Sentence Prediction module is included (CLI: --show-nsp-module / --nsp-predict)."
+        abs2_hint = "- Complex abs2 memory-efficient module is included (CLI: --show-abs2-module / --abs2-demo)."
+        complex_builtin_hint = "- Built-in complex() module is included (CLI: --show-complex-module / --complex-demo)."
+        vr_autonomy_hint = "- VR autonomy/accessibility modules are included (CLI: --list-vr-autonomy-modules / --simulate-vr-autonomy)."
         vr_methods = "\n".join(f"- {m}" for m in VR_OUTLOOK_METHODS)
         return (
             f"Google-inspired strategy:\n{ideas}\n\n"
@@ -1947,9 +2721,15 @@ class CodexUnifiedAgent:
             f"GitHub module candidates:\n{github_lines}\n\n"
             f"VR foresight + resilience modules:\n{vr_lines}\n\n"
             f"VR time-travel modules (SemanticProxy sourced):\n{vr_tt_lines}\n\n"
+            f"Emerging Python 2026 modules (DasRoot sourced):\n{dasroot_lines}\n\n"
+            f"Python Trends 2025 applications (LinkedIn sourced):\n{linkedin_lines}\n\n"
+            f"VR autonomy + accessibility modules:\n{vr_autonomy_lines}\n\n"
             f"BestProjectIdeas AI catalog sample (10/50):\n{idea_sample}\n\n"
             f"Requested Python add-ons sample (12/32):\n{addon_sample}\n\n"
             f"NSP module:\n{nsp_hint}\n\n"
+            f"Complex abs2 module:\n{abs2_hint}\n\n"
+            f"Built-in complex module:\n{complex_builtin_hint}\n\n"
+            f"VR autonomy/accessibility module:\n{vr_autonomy_hint}\n\n"
             f"VR implementation paths (Python / mixed-language):\n{vr_methods}\n\n"
             f"Remembrance guide:\n{remembrance}"
         )
@@ -2152,10 +2932,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vr-steps", type=int, default=10, help="VR simulation step count")
     parser.add_argument("--simulate-vr-timetravel", action="store_true", help="Run VR time-travel simulation and exit")
     parser.add_argument("--vr-timetravel-steps", type=int, default=12, help="VR time-travel simulation step count")
+    parser.add_argument("--simulate-vr-autonomy", action="store_true", help="Run VR autonomy/accessibility simulation and exit")
+    parser.add_argument("--vr-autonomy-steps", type=int, default=14, help="VR autonomy/accessibility simulation step count")
     parser.add_argument("--list-github-modules", action="store_true", help="List curated GitHub module catalog and exit")
     parser.add_argument("--list-openai-modules", action="store_true", help="List curated OpenAI module catalog and exit")
+    parser.add_argument("--list-dasroot-2026-modules", action="store_true", help="List DasRoot 2026 emerging Python modules and exit")
+    parser.add_argument("--list-linkedin-python2025-modules", action="store_true", help="List LinkedIn Python Trends 2025 application modules and exit")
     parser.add_argument("--list-vr-modules", action="store_true", help="List curated VR module catalog and exit")
     parser.add_argument("--list-vr-timetravel-modules", action="store_true", help="List SemanticProxy-based VR time-travel modules and exit")
+    parser.add_argument("--list-vr-autonomy-modules", action="store_true", help="List VR autonomy/accessibility module catalog and exit")
     parser.add_argument("--list-bestprojectideas-ai50", action="store_true", help="List all 50 AI ideas sourced from BestProjectIdeas and exit")
     parser.add_argument("--list-requested-addons32", action="store_true", help="List all 32 user-requested Python add-ons and exit")
     parser.add_argument("--show-nsp-module", action="store_true", help="Show Next Sentence Prediction (BERT) module spec and exit")
@@ -2164,6 +2949,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sentence-b", default="", help="Second sentence for NSP")
     parser.add_argument("--nsp-model", default="bert-base-uncased", help="Transformers model id for NSP")
     parser.add_argument("--nsp-backend", default="auto", choices=["auto", "transformers", "heuristic"], help="NSP backend")
+    parser.add_argument("--show-abs2-module", action="store_true", help="Show memory-efficient complex abs2 module spec and exit")
+    parser.add_argument("--abs2-demo", action="store_true", help="Run complex abs2 demo benchmark and exit")
+    parser.add_argument("--abs2-shape", default="4096,128", help="Complex input shape for abs2 demo, e.g. 4096,128")
+    parser.add_argument("--abs2-dtype", default="complex128", choices=["complex64", "complex128"], help="Complex dtype for abs2 demo")
+    parser.add_argument(
+        "--abs2-backend",
+        default="auto",
+        choices=["auto", "numpy_abs_square", "numpy_inplace_complex", "numba_vectorize", "conjugate_multiply", "float_view_dot"],
+        help="Backend for complex abs2 demo",
+    )
+    parser.add_argument("--abs2-overwrite-input", action="store_true", help="Allow abs2 demo to overwrite input for lower memory use")
+    parser.add_argument("--show-complex-module", action="store_true", help="Show built-in complex() module spec and exit")
+    parser.add_argument("--complex-demo", action="store_true", help="Run built-in complex() module demo and exit")
+    parser.add_argument("--complex-a", default="1+2j", help="First complex literal for demo, e.g. 1+2j")
+    parser.add_argument("--complex-b", default="3+4j", help="Second complex literal for demo, e.g. 3+4j")
     parser.add_argument("--chat-completions", action="store_true", help="Use legacy chat/completions fallback")
     parser.add_argument("--json", action="store_true", help="Emit structured JSON result")
     parser.add_argument("--verbose", action="store_true", help="Verbose stderr logging")
@@ -2259,6 +3059,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.simulate_vr_autonomy:
+        sim = simulate_vr_autonomy_accessibility(config, steps=max(1, int(args.vr_autonomy_steps)))
+        print(
+            json.dumps(
+                {
+                    "version": VERSION,
+                    "mode": "vr_autonomy_accessibility_simulation",
+                    "steps": sim.steps,
+                    "automation_reliability": round(sim.automation_reliability, 4),
+                    "update_safety_score": round(sim.update_safety_score, 4),
+                    "autopilot_world_stability": round(sim.autopilot_world_stability, 4),
+                    "haptic_accessibility_score": round(sim.haptic_accessibility_score, 4),
+                    "hearing_accessibility_score": round(sim.hearing_accessibility_score, 4),
+                    "mental_mode_safety_score": round(sim.mental_mode_safety_score, 4),
+                    "overall_safety_score": round(sim.overall_safety_score, 4),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
     if args.list_github_modules:
         catalog = build_github_module_catalog()
         print(
@@ -2289,6 +3111,51 @@ def main(argv: list[str] | None = None) -> int:
                         "url": m.url,
                         "focus": m.focus,
                         "why_it_matters": m.why_it_matters,
+                    }
+                    for m in catalog
+                ],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if args.list_dasroot_2026_modules:
+        catalog = build_dasroot_emerging_python_2026_modules()
+        print(
+            json.dumps(
+                [
+                    {
+                        "name": m.name,
+                        "category": m.category,
+                        "summary": m.summary,
+                        "python_stack": m.python_stack,
+                        "suggested_application": m.suggested_application,
+                        "cited_versions": m.cited_versions,
+                        "compliance_notes": m.compliance_notes,
+                        "source_url": m.source_url,
+                    }
+                    for m in catalog
+                ],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if args.list_linkedin_python2025_modules:
+        catalog = build_linkedin_python_trends_2025_modules()
+        print(
+            json.dumps(
+                [
+                    {
+                        "trend_id": m.trend_id,
+                        "trend_name": m.trend_name,
+                        "summary": m.summary,
+                        "python_stack": m.python_stack,
+                        "suggested_application": m.suggested_application,
+                        "learning_path": m.learning_path,
+                        "source_url": m.source_url,
                     }
                     for m in catalog
                 ],
@@ -2329,6 +3196,30 @@ def main(argv: list[str] | None = None) -> int:
                         "mixed_stack": m.mixed_stack,
                         "focus": m.focus,
                         "source_url": m.source_url,
+                    }
+                    for m in catalog
+                ],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if args.list_vr_autonomy_modules:
+        catalog = build_vr_autonomy_accessibility_modules()
+        print(
+            json.dumps(
+                [
+                    {
+                        "module_id": m.module_id,
+                        "name": m.name,
+                        "category": m.category,
+                        "summary": m.summary,
+                        "python_stack": m.python_stack,
+                        "mixed_stack": m.mixed_stack,
+                        "target_outcome": m.target_outcome,
+                        "compliance_notes": m.compliance_notes,
+                        "sources": m.sources,
                     }
                     for m in catalog
                 ],
@@ -2411,13 +3302,132 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.show_abs2_module:
+        catalog = build_complex_abs2_module_catalog()
+        print(
+            json.dumps(
+                {
+                    **build_complex_abs2_module_spec(),
+                    "methods": [
+                        {
+                            "name": m.name,
+                            "backend_key": m.backend_key,
+                            "preserves_input": m.preserves_input,
+                            "output_dtype": m.output_dtype,
+                            "memory_note": m.memory_note,
+                            "source_url": m.source_url,
+                        }
+                        for m in catalog
+                    ],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if args.abs2_demo:
+        try:
+            import importlib
+
+            np_mod = importlib.import_module("numpy")
+            shape = _parse_shape_csv(args.abs2_shape)
+            real_dtype = np_mod.float64 if args.abs2_dtype == "complex128" else np_mod.float32
+            complex_dtype = np_mod.complex128 if args.abs2_dtype == "complex128" else np_mod.complex64
+            rng = np_mod.random.default_rng(42)
+            arr = (
+                rng.standard_normal(size=shape, dtype=real_dtype)
+                + 1j * rng.standard_normal(size=shape, dtype=real_dtype)
+            ).astype(complex_dtype, copy=False)
+            arr_before = arr.copy()
+
+            out, meta = compute_complex_abs2(
+                arr=arr,
+                backend=args.abs2_backend,
+                preserve_input=not args.abs2_overwrite_input,
+            )
+            input_preserved = bool(np_mod.array_equal(arr, arr_before))
+            preview = np_mod.asarray(out).reshape(-1)[:5].tolist()
+
+            print(
+                json.dumps(
+                    {
+                        "module": build_complex_abs2_module_spec()["name"],
+                        "source_url": build_complex_abs2_module_spec()["source_url"],
+                        "shape": shape,
+                        "dtype": args.abs2_dtype,
+                        "backend_requested": args.abs2_backend,
+                        "backend_used": meta["backend_used"],
+                        "preserve_input_requested": not args.abs2_overwrite_input,
+                        "input_preserved": input_preserved,
+                        "input_nbytes": meta["input_nbytes"],
+                        "output_nbytes": meta["output_nbytes"],
+                        "peak_estimate_bytes": meta["peak_estimate_bytes"],
+                        "peak_estimate_human": bytes_to_human(meta["peak_estimate_bytes"]),
+                        "output_preview": preview,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        except Exception as exc:  # noqa: BLE001
+            print(f"abs2 demo failed: {exc}")
+            return 2
+
+    if args.show_complex_module:
+        mod = build_realpython_complex_module()
+        print(
+            json.dumps(
+                {
+                    "name": mod.name,
+                    "short_description": mod.short_description,
+                    "last_verified": mod.last_verified,
+                    "constructor_syntax": mod.constructor_syntax,
+                    "arguments": mod.arguments,
+                    "return_value": mod.return_value,
+                    "examples": mod.examples,
+                    "methods": mod.methods,
+                    "common_use_cases": mod.common_use_cases,
+                    "real_world_example": mod.real_world_example,
+                    "related_resources": mod.related_resources,
+                    "source_url": mod.source_url,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if args.complex_demo:
+        mod = build_realpython_complex_module()
+        try:
+            demo = run_complex_module_demo(args.complex_a, args.complex_b)
+            print(
+                json.dumps(
+                    {
+                        "module": mod.name,
+                        "source_url": mod.source_url,
+                        "demo": demo,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        except Exception as exc:  # noqa: BLE001
+            print(f"complex demo failed: {exc}")
+            return 2
+
     if not args.goal.strip():
         print(
             "A non-empty --goal is required unless --simulate, --simulate-vr, "
-            "--simulate-vr-timetravel, --list-github-modules, --list-openai-modules, "
-            "--list-vr-modules, --list-vr-timetravel-modules, "
+            "--simulate-vr-timetravel, --simulate-vr-autonomy, --list-github-modules, --list-openai-modules, "
+            "--list-dasroot-2026-modules, --list-linkedin-python2025-modules, "
+            "--list-vr-modules, --list-vr-timetravel-modules, --list-vr-autonomy-modules, "
             "--list-bestprojectideas-ai50, --list-requested-addons32, "
-            "--show-nsp-module, or --nsp-predict is used."
+            "--show-nsp-module, --nsp-predict, --show-abs2-module, --abs2-demo, "
+            "--show-complex-module, or --complex-demo is used."
         )
         return 2
 
